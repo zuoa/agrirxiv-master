@@ -35,7 +35,7 @@ class CABDigitalLibraryCrawler:
             'User-Agent': random.choice(user_agents),
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'en-US,en;q=0.9,zh-CN;q=0.8,zh;q=0.7',
-            'Accept-Encoding': 'gzip, deflate, br',
+            # 'Accept-Encoding': 'gzip, deflate, br',
             'Cache-Control': 'max-age=0',
             'Connection': 'keep-alive',
             'Upgrade-Insecure-Requests': '1',
@@ -45,20 +45,22 @@ class CABDigitalLibraryCrawler:
             'Sec-Fetch-User': '?1',
             'sec-ch-ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
             'sec-ch-ua-mobile': '?0',
-            'sec-ch-ua-platform': '"Windows"'
+            'sec-ch-ua-platform': '"MacOS"'
         })
         self.articles_data = []
 
     def _is_captcha_page(self, soup):
         """检查是否为验证页面"""
-        captcha_indicators = [
-            'captcha', 'verification', 'challenge', 'robot', 'cloudflare'
-        ]
-        try:
-            page_text = soup.get_text().lower()
-            return any(indicator in page_text for indicator in captcha_indicators)
-        except Exception:
-            return False
+        # captcha_indicators = [
+        #     'captcha', 'verification', 'challenge', 'robot', 'cloudflare'
+        # ]
+        # try:
+        #     page_text = soup.get_text().lower()
+        #     return any(indicator in page_text for indicator in captcha_indicators)
+        # except Exception:
+        #     return False
+
+        return False
 
     def get_search_results(self, search_url, max_pages=None):
         """
@@ -122,9 +124,6 @@ class CABDigitalLibraryCrawler:
 
                 response.raise_for_status()
                 retry_count = 0  # 成功后重置重试计数
-
-                # 处理编码问题
-                response.encoding = self._detect_encoding(response)
 
                 # 解析HTML
                 soup = BeautifulSoup(response.text, 'html.parser')
@@ -227,14 +226,8 @@ class CABDigitalLibraryCrawler:
         """从页面中提取文章信息"""
         articles = []
 
-        # 查找文章条目 - 需要根据实际HTML结构调整选择器
-        article_elements = soup.find_all(['div', 'article'], class_=re.compile(r'(item|result|article|entry)', re.I))
-
-        if not article_elements:
-            # 尝试其他可能的选择器
-            article_elements = soup.find_all('div', {'data-doi': True}) or \
-                               soup.find_all('div', class_=re.compile(r'search-result', re.I)) or \
-                               soup.find_all('li', class_=re.compile(r'result', re.I))
+        # 查找文章条目 - 根据实际HTML结构选择器
+        article_elements = soup.find_all('li', class_='search__item')
 
         for element in article_elements:
             try:
@@ -244,19 +237,6 @@ class CABDigitalLibraryCrawler:
             except Exception as e:
                 logger.warning(f"提取文章信息时出错: {e}")
                 continue
-
-        # 如果上述方法都没找到，尝试查找所有包含DOI或PDF链接的元素
-        if not articles:
-            potential_articles = soup.find_all('a', href=re.compile(r'(doi|pdf)', re.I))
-            for link in potential_articles:
-                parent = link.find_parent(['div', 'li', 'article'])
-                if parent:
-                    try:
-                        article_info = self._extract_article_info(parent)
-                        if article_info and article_info not in articles:
-                            articles.append(article_info)
-                    except:
-                        continue
 
         return articles
 
@@ -278,54 +258,49 @@ class CABDigitalLibraryCrawler:
 
         try:
             # 提取标题
-            title_elem = element.find(['h1', 'h2', 'h3', 'h4'], class_=re.compile(r'title', re.I)) or \
-                         element.find('a', class_=re.compile(r'title', re.I)) or \
-                         element.find(['h1', 'h2', 'h3', 'h4']) or \
-                         element.find('span', class_=re.compile(r'title', re.I))
-
+            title_elem = element.find('h4')
             if title_elem:
                 article_info['title'] = self._safe_get_text(title_elem)
 
             # 提取作者
-            authors_elem = element.find(['span', 'div'], class_=re.compile(r'author', re.I)) or \
-                           element.find(['span', 'div'], class_=re.compile(r'contrib', re.I))
+            authors_list = element.find('ul', class_='rlist--inline')
+            if authors_list:
+                authors = []
+                for author_elem in authors_list.find_all('a'):
+                    author_name = self._safe_get_text(author_elem)
+                    if author_name:
+                        authors.append(author_name)
+                article_info['authors'] = ', '.join(authors)
 
-            if authors_elem:
-                article_info['authors'] = self._safe_get_text(authors_elem)
+            # 提取DOI和文章URL
+            doi_input = element.find('input', {'name': 'doi'})
+            if doi_input and doi_input.get('value'):
+                doi = doi_input['value']
+                article_info['doi'] = doi
+                article_info['article_url'] = f"{self.base_url}/doi/{doi}"
 
-            # 提取DOI
-            doi_link = element.find('a', href=re.compile(r'/doi/', re.I))
-            if doi_link:
-                href = doi_link.get('href')
-                article_info['article_url'] = urljoin(self.base_url, href)
-                # 从URL中提取DOI
-                doi_match = re.search(r'/doi/(?:abs/|full/)?(.+)', href)
-                if doi_match:
-                    article_info['doi'] = doi_match.group(1)
-
-            # 查找PDF链接
-            pdf_link = element.find('a', href=re.compile(r'pdf', re.I)) or \
-                       element.find('a', string=re.compile(r'pdf', re.I))
-
-            if pdf_link:
-                pdf_href = pdf_link.get('href')
-                article_info['pdf_url'] = urljoin(self.base_url, pdf_href)
-            elif article_info['article_url']:
-                # 尝试构建PDF URL
-                pdf_url = article_info['article_url'].replace('/doi/abs/', '/doi/pdf/').replace('/doi/full/', '/doi/pdf/')
-                if '/doi/pdf/' in pdf_url:
-                    article_info['pdf_url'] = pdf_url
+            # 提取PDF链接
+            # pdf_link = element.find('a', href=re.compile(r'/doi/epdf/'))
+            # if pdf_link:
+            #     pdf_href = pdf_link.get('href')
+            #     article_info['pdf_url'] = urljoin(self.base_url, pdf_href)
+            article_info['pdf_url'] = article_info.get('article_url', '').replace('www.cabidigitallibrary.org/doi/','www.cabidigitallibrary.org/doi/pdf/')
 
             # 提取发布日期
-            date_elem = element.find(['span', 'div'], class_=re.compile(r'date|published', re.I))
-            if date_elem:
-                article_info['publication_date'] = self._safe_get_text(date_elem)
+            date_span = element.find('span', string=re.compile(r'\d{1,2}\s+\w+\s+\d{4}'))
+            if date_span:
+                article_info['publication_date'] = self._safe_get_text(date_span)
 
             # 提取摘要
-            abstract_elem = element.find(['div', 'p'], class_=re.compile(r'abstract', re.I))
+            abstract_elem = element.find('span', class_='hlFld-Abstract')
             if abstract_elem:
                 abstract_text = self._safe_get_text(abstract_elem)
-                article_info['abstract'] = abstract_text[:500] if abstract_text else ''  # 限制长度
+                article_info['abstract'] = abstract_text[:500] if abstract_text else ''
+
+            # 提取期刊信息
+            journal_elem = element.find('a', href=re.compile(r'/journal/'))
+            if journal_elem:
+                article_info['journal'] = self._safe_get_text(journal_elem)
 
             # 只有当至少有标题时才返回文章信息
             if article_info['title']:
@@ -562,7 +537,7 @@ def main():
         print("开始完整爬取...")
         crawler.crawl_and_download(
             search_url=search_url,
-            output_dir="./agrirxiv_downloads",
+            output_dir="./downloads",
             max_pages=None,  # 爬取所有页面
             download_pdfs=True
         )
